@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ASL Recognition Game</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; }
+        .button-container { margin: 20px; }
+        #result { margin: 20px; font-weight: bold; }
+        #video-container { display: flex; justify-content: center; }
+    </style>
+</head>
+<body>
+    <div class="button-container">
+        <button onclick="loadModel('alphabet')">Alphabet Model</button>
+        <button onclick="loadModel('number')">Number Model</button>
+    </div>
+
+    <div id="current-model"></div>
+
+    <div id="video-container">
+        <video id="video" width="640" height="480" autoplay></video>
+        <canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
+    </div>
+
+    <div class="number-container">
+        <h2>Target: <span id="random-number"></span></h2>
+    </div>
+
+    <div id="result" class="result"></div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let currentModelType = null;
+
+        // Start video capture
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(err => console.error("Error accessing webcam:", err));
+
+        function loadModel(modelType) {
+            fetch(`/load_model/${modelType}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        currentModelType = modelType;
+                        $('#current-model').text(`Current Model: ${modelType.charAt(0).toUpperCase() + modelType.slice(1)}`);
+                        $('#random-number').text(data.target);
+                        startPrediction();
+                    }
+                });
+        }
+
+        function startPrediction() {
+            // Capture frame every second
+            setInterval(() => {
+                if (!currentModelType) return;
+
+                // Draw current video frame to canvas
+                ctx.drawImage(video, 0, 0, 640, 480);
+                
+                // Convert canvas to base64
+                const frameData = canvas.toDataURL('image/jpeg').split(',')[1];
+
+                // Send to backend for prediction
+                fetch('/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ frame: frameData })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.predicted_character) {
+                        $('#result').text(`Predicted: ${data.predicted_character}`);
+
+                        if (data.is_correct) {
+                            if (data.new_target !== null) {
+                                $('#random-number').text(data.new_target);
+                                $('#result').text('Correct Gesture!');
+                            } else {
+                                $('#result').text('Completed all targets!');
+                            }
+                        }
+                    }
+                });
+            }, 1000);
+        }
+    </script>
+</body>
+</html>

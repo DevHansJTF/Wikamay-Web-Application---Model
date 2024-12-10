@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Camera Recognition</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #camera-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: rgba(158, 77, 178, 0.5);
+            border-radius: 15px;
+        }
+        #video-element {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 15px;
+        }
+        .error-message {
+            color: white;
+            text-align: center;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 8px;
+            margin: 10px;
+        }
+        .error-message button {
+            margin-top: 10px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        .error-message button:hover {
+            background: #eee;
+        }
+        .loading-message {
+            color: white;
+            text-align: center;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="camera-container">
+        <div class="loading-message">Initializing camera...</div>
+    </div>
+    
+    <script>
+        let videoElement = null;
+        let stream = null;
+        let isRecognitionActive = false;
+        let currentModelType = null;
+        let retryAttempts = 0;
+        const MAX_RETRY_ATTEMPTS = 3;
+
+        // Initialize when the page loads
+        window.onload = function() {
+            notifyParent('IFRAME_READY');
+        };
+
+        // Handle messages from parent
+        window.addEventListener('message', async function(event) {
+            if (!isValidOrigin(event.origin)) {
+                console.warn('Invalid origin:', event.origin);
+                return;
+            }
+
+            const { type, data } = event.data;
+            
+            switch(type) {
+                case 'START_RECOGNITION':
+                    currentModelType = data.modelType;
+                    await startCamera();
+                    break;
+                case 'STOP_RECOGNITION':
+                    await stopCamera();
+                    break;
+                case 'PAUSE_RECOGNITION':
+                    isRecognitionActive = false;
+                    if (videoElement) videoElement.pause();
+                    break;
+                case 'RESUME_RECOGNITION':
+                    if (stream && videoElement) {
+                        isRecognitionActive = true;
+                        await videoElement.play();
+                        captureAndPredict();
+                    }
+                    break;
+            }
+        });
+
+        function isValidOrigin(origin) {
+            return ['http://127.0.0.1:5501', 'http://127.0.0.1:5000'].includes(origin);
+        }
+
+        function notifyParent(type, data = null) {
+            window.parent.postMessage({ type, data }, 'http://127.0.0.1:5501');
+        }
+
+        async function startCamera() {
+            const container = document.getElementById('camera-container');
+            retryAttempts = 0;
+            
+            try {
+                container.innerHTML = '<div class="loading-message">Requesting camera access...</div>';
+                
+                // Check camera permissions
+                const permissions = await navigator.permissions.query({ name: 'camera' });
+                if (permissions.state === 'denied') {
+                    throw new Error('Camera access denied. Please allow camera access in your browser settings.');
+                }
+
+                // Create video element
+                videoElement = document.createElement('video');
+                videoElement.id = 'video-element';
+                videoElement.playsInline = true;
+                videoElement.muted = true;
+                videoElement.autoplay = true;
+
+                // Get camera stream
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                });
+
+                // Set up video stream
+                videoElement.srcObject = stream;
+                container.innerHTML = '';
+                container.appendChild(videoElement);
+
+                // Wait for video to be ready
+                await new Promise((resolve) => {
+                    videoElement.onloadedmetadata = resolve;
+                });
+                await videoElement.play();
+
+                // Load recognition model
+                console.log('Loading model:', currentModelType);
+                const response = await fetch(`http://127.0.0.1:5000/api/load_model/${currentModelType}`);
+                const modelData = await response.json();
+
+                if (modelData.success) {
+                    isRecognitionActive = true;
+                    captureAndPredict();
+                } else {
+                    throw new Error('Failed to load recognition model');
+                }
+            } catch (error) {
+                console.error('Camera/Model error:', error);
+                handleError(error);
+            }
+        }
+
+        function handleError(error) {
+            const errorMessage = error.name === 'NotAllowedError' 
+                ? 'Camera access denied. Please allow camera access and try again.'
+                : error.message;
+
+            const container = document.getElementById('camera-container');
+            container.innerHTML = `
+                <div class="error-message">
+                    <p>Error: ${errorMessage}</p>
+                    <p>Please ensure camera permissions are granted</p>
+                    <button onclick="retryCamera()">Try Again</button>
+                </div>
+            `;
+
+            notifyParent('CAMERA_ERROR', { error: errorMessage });
+        }
+
+        async function retryCamera() {
+            if (retryAttempts >= MAX_RETRY_ATTEMPTS) {
+                handleError(new Error('Maximum retry attempts reached. Please refresh the page.'));
+                return;
+            }
+
+            retryAttempts++;
+            await stopCamera();
+            await startCamera();
+        }
+
+        async function captureAndPredict() {
+    if (!isRecognitionActive || !videoElement || !stream) return;
+
+    try {
+        // Create canvas and capture frame
+        const canvas = document.createElement('canvas');
+        canvas.width = videoElement.videoWidth;
+        canvas.height = videoElement.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(videoElement, 0, 0);
+        
+        // Send frame for prediction
+        const response = await fetch('http://127.0.0.1:5000/api/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                frame: canvas.toDataURL('image/jpeg') 
+            })
+        });
+        
+        const result = await response.json();
+        if (result && result.predicted_character) {
+            notifyParent('PREDICTION_RESULT', result);
+            
+            // If correct prediction, pause briefly
+            if (result.is_correct) {
+                isRecognitionActive = false;
+                setTimeout(() => {
+                    if (videoElement && stream) {
+                        isRecognitionActive = true;
+                        requestAnimationFrame(captureAndPredict);
+                    }
+                }, 1500);
+                return;
+            }
+        }
+        
+        // Continue prediction loop if active
+        if (isRecognitionActive) {
+            requestAnimationFrame(captureAndPredict);
+        }
+    } catch (error) {
+        console.error('Prediction error:', error);
+        if (isRecognitionActive) {
+            setTimeout(() => requestAnimationFrame(captureAndPredict), 1000);
+        }
+    }
+}
+
+        async function stopCamera() {
+            isRecognitionActive = false;
+
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            if (videoElement) {
+                videoElement.srcObject = null;
+                videoElement = null;
+            }
+
+            const container = document.getElementById('camera-container');
+            container.innerHTML = '<div class="loading-message">Camera stopped</div>';
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', stopCamera);
+
+        // Handle errors
+        window.addEventListener('error', (event) => {
+            console.error('Global error:', event);
+            notifyParent('CAMERA_ERROR', { 
+                error: 'An unexpected error occurred' 
+            });
+        });
+    </script>
+</body>
+</html>
